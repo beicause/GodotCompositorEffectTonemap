@@ -13,6 +13,7 @@ sky = SubResource("Sky_so4bd")
 glow_blend_mode = 0
 
 [sub_resource type="PostEffectToneMap" id="PostEffectToneMap_28hsc"]
+use_fxaa = true
 tonemap_type = 5
 
 [sub_resource type="Compositor" id="Compositor_so4bd"]
