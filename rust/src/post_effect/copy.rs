@@ -1,4 +1,4 @@
-use std::hash::Hash;
+use std::{collections::HashMap, hash::Hash};
 
 use godot::{
     classes::{
@@ -15,16 +15,14 @@ use zerocopy::FromBytes;
 
 use crate::GlobalRidsSingleton;
 
-pub const TEX_COPY_SHADER_PATH: &str = "uid://bky734u2m1ik4";
-pub const DOWNSAMPLER_SHADER_PATH: &str = "uid://dn7kvwu3pc8ht";
-pub const UPSAMPLE_SHADER_PATH: &str = "uid://d20ptrfi77euk";
-pub const TONEMAPPER_SHADER_PATH: &str = "uid://dch7mum06agob";
+const TEX_COPY_SHADER_PATH: &str = "uid://bky734u2m1ik4";
+const DOWNSAMPLER_SHADER_PATH: &str = "uid://dn7kvwu3pc8ht";
+const UPSAMPLE_SHADER_PATH: &str = "uid://d20ptrfi77euk";
+const TONEMAPPER_SHADER_PATH: &str = "uid://dch7mum06agob";
 
-pub const SC_TONEMAP_TYPE_INDEX: u8 = 2;
-pub const SC_GLOW_MODE_INDEX: u8 = 9;
-pub const SC_MAX: u8 = 11;
-
-const RASTER_PIPELINE_CACHE_SIZE: usize = 16;
+const SC_TONEMAP_TYPE_INDEX: u8 = 2;
+const SC_GLOW_MODE_INDEX: u8 = 9;
+const SC_MAX_INDEX: u8 = 11;
 
 pub struct Raster {
     pub rd: Gd<RenderingDevice>,
@@ -35,13 +33,7 @@ pub struct Raster {
     multisample_state: Gd<RdPipelineMultisampleState>,
     depth_stencil_state: Gd<RdPipelineDepthStencilState>,
     blend_state: Gd<RdPipelineColorBlendState>,
-    pipeline_cache: quick_cache::unsync::Cache<
-        RasterPipelineKey,
-        Rid,
-        quick_cache::UnitWeighter,
-        quick_cache::DefaultHashBuilder,
-        RasterPipelineCacheLifecycle,
-    >,
+    pipeline_cache: HashMap<RasterPipelineKey, Rid>,
 }
 
 #[derive(Clone)]
@@ -79,22 +71,8 @@ impl PartialEq for RasterPipelineKey {
         is_eq
     }
 }
+
 impl Eq for RasterPipelineKey {}
-
-struct RasterPipelineCacheLifecycle;
-
-impl quick_cache::Lifecycle<RasterPipelineKey, Rid> for RasterPipelineCacheLifecycle {
-    type RequestState = ();
-
-    fn begin_request(&self) -> Self::RequestState {}
-
-    fn on_evict(&self, _state: &mut Self::RequestState, _key: RasterPipelineKey, val: Rid) {
-        RenderingServer::singleton()
-            .get_rendering_device()
-            .unwrap()
-            .free_rid(val);
-    }
-}
 
 impl Drop for Raster {
     fn drop(&mut self) {
@@ -112,13 +90,7 @@ impl Raster {
         let mut rd = RenderingServer::singleton().get_rendering_device().unwrap();
         let spirv = shader_file.get_spirv().unwrap();
         let shader = rd.shader_create_from_spirv(&spirv);
-        let pipeline_cache = quick_cache::unsync::Cache::with(
-            RASTER_PIPELINE_CACHE_SIZE,
-            RASTER_PIPELINE_CACHE_SIZE.try_into().unwrap(),
-            Default::default(),
-            Default::default(),
-            RasterPipelineCacheLifecycle,
-        );
+        let pipeline_cache = HashMap::new();
 
         let rasterization_state = RdPipelineRasterizationState::new_gd();
         let multisample_state = RdPipelineMultisampleState::new_gd();
@@ -164,33 +136,30 @@ impl Raster {
     ) {
         self.framebuffer = fb;
         let fb_fmt = self.rd.framebuffer_get_format(fb);
-        self.pipeline = *self
-            .pipeline_cache
-            .get_or_insert_with(
-                &RasterPipelineKey {
-                    fb_fmt,
-                    scs: scs.clone(),
-                },
-                || -> Result<Rid, ()> {
-                    let pipeline = self
-                        .rd
-                        .render_pipeline_create_ex(
-                            self.shader,
-                            fb_fmt,
-                            RenderingDevice::INVALID_ID.into(),
-                            RenderPrimitive::TRIANGLES,
-                            &self.rasterization_state,
-                            &self.multisample_state,
-                            &self.depth_stencil_state,
-                            &self.blend_state,
-                        )
-                        .specialization_constants(scs)
-                        .done();
-                    Ok(pipeline)
-                },
-            )
-            .unwrap()
-            .unwrap();
+        let key = RasterPipelineKey {
+            fb_fmt,
+            scs: scs.clone(),
+        };
+        let mut pipeline = self.pipeline_cache.get(&key).copied();
+        if pipeline.is_none() {
+            pipeline = Some(
+                self.rd
+                    .render_pipeline_create_ex(
+                        self.shader,
+                        fb_fmt,
+                        RenderingDevice::INVALID_ID.into(),
+                        RenderPrimitive::TRIANGLES,
+                        &self.rasterization_state,
+                        &self.multisample_state,
+                        &self.depth_stencil_state,
+                        &self.blend_state,
+                    )
+                    .specialization_constants(scs)
+                    .done(),
+            );
+            self.pipeline_cache.insert(key, pipeline.unwrap());
+        }
+        self.pipeline = pipeline.unwrap();
     }
 }
 
@@ -568,7 +537,7 @@ pub struct ToneMapper {
 impl ToneMapper {
     pub fn init() -> Self {
         let mut scs = Array::new();
-        for i in 0..=SC_MAX {
+        for i in 0..=SC_MAX_INDEX {
             let mut sc = RdPipelineSpecializationConstant::new_gd();
             sc.set_constant_id(i.into());
             sc.set_value(&false.to_variant());
@@ -624,8 +593,8 @@ impl ToneMapper {
         // Specialization constant.
         let fv = false.to_variant();
         let tv = true.to_variant();
-        for i in 0..10 {
-            self.scs.get(i).unwrap().set_value(&fv);
+        for i in 0..=SC_MAX_INDEX {
+            self.scs.get(i.into()).unwrap().set_value(&fv);
         }
         self.scs
             .get(0)
@@ -643,16 +612,6 @@ impl ToneMapper {
             .get(settings.glow_mode as usize + Into::<usize>::into(SC_GLOW_MODE_INDEX))
             .unwrap()
             .set_value(&tv);
-        // use_glow_map
-        // use_fxaa
-        // tonemapper_linear
-        // tonemapper_reinhard
-        // tonemapper_filmic
-        // tonemapper_aces
-        // tonemapper_agx
-        // glow_mode_add
-        // glow_mode_replace
-        // glow_mode_mix
 
         // Pipeline.
         self.renderer
