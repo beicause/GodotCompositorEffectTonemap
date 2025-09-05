@@ -1,0 +1,16 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.5
+reloadable = true
+
+[libraries]
+linux.debug.x86_64 =     "res://../rust/target/x86_64-unknown-linux-gnu/debug/libxk_lk_qy_dc.so"
+linux.release.x86_64 =   "res://../rust/target/x86_64-unknown-linux-gnu/release/libxk_lk_qy_dc.so"
+windows.debug.x86_64 =   "res://../rust/target/debug/xk_lk_qy_dc.dll"
+windows.release.x86_64 = "res://../rust/target/release/xk_lk_qy_dc.dll"
+macos.debug =            "res://../rust/target/debug/libxk_lk_qy_dc.dylib"
+macos.release =          "res://../rust/target/release/libxk_lk_qy_dc.dylib"
+macos.debug.arm64 =      "res://../rust/target/debug/libxk_lk_qy_dc.dylib"
+macos.release.arm64 =    "res://../rust/target/release/libxk_lk_qy_dc.dylib"
+android.debug.arm64 =    "res://../rust/target/aarch64-linux-android/debug/libxk_lk_qy_dc.so"
+android.release.arm64 =    "res://../rust/target/aarch64-linux-android/release/libxk_lk_qy_dc.so"

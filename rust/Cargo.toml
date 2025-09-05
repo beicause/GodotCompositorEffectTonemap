@@ -1,0 +1,21 @@
+[package]
+name = "xk_lk_qy_dc"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+godot = { git = "https://github.com/godot-rust/gdext", branch = "master", features = [
+    "api-custom",
+    "experimental-threads",
+    "experimental-godot-api",
+] }
+zerocopy = { version = "0.8.26", features = ["alloc", "std", "derive"] }
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 1

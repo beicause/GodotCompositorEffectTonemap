@@ -1,0 +1,41 @@
+[gd_scene load_steps=8 format=3 uid="uid://vccmeumua3a6"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_28hsc"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_so4bd"]
+sky_material = SubResource("ProceduralSkyMaterial_28hsc")
+
+[sub_resource type="Environment" id="Environment_4v18s"]
+background_mode = 2
+sky = SubResource("Sky_so4bd")
+glow_blend_mode = 0
+
+[sub_resource type="PostEffectToneMap" id="PostEffectToneMap_28hsc"]
+tonemap_type = 5
+
+[sub_resource type="Compositor" id="Compositor_so4bd"]
+compositor_effects = Array[CompositorEffect]([SubResource("PostEffectToneMap_28hsc")])
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4v18s"]
+albedo_color = Color(1.759715, 0.9167989, 1.2167182, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_28hsc"]
+
+[node name="TestEffects" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_4v18s")
+compositor = SubResource("Compositor_so4bd")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
+shadow_enabled = true
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+material_override = SubResource("StandardMaterial3D_4v18s")
+mesh = SubResource("BoxMesh_28hsc")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(0.6577566, -0.29974714, 0.69101954, 1.8205165e-08, 0.9174077, 0.3979487, -0.7532306, -0.26175338, 0.60343105, 1.3192763, 0.80421484, 1.2056694)
