@@ -1,3 +1,5 @@
+use std::hash::Hash;
+
 use godot::{
     classes::{
         Engine, FramebufferCacheRd, RdPipelineColorBlendState, RdPipelineColorBlendStateAttachment,
@@ -22,14 +24,79 @@ pub const SC_TONEMAP_TYPE_INDEX: u8 = 2;
 pub const SC_GLOW_MODE_INDEX: u8 = 9;
 pub const SC_MAX: u8 = 11;
 
-pub struct Renderer {
+const RASTER_PIPELINE_CACHE_SIZE: usize = 16;
+
+pub struct Raster {
     pub rd: Gd<RenderingDevice>,
     pub shader: Rid,
     pub pipeline: Rid,
     pub framebuffer: Rid,
+    rasterization_state: Gd<RdPipelineRasterizationState>,
+    multisample_state: Gd<RdPipelineMultisampleState>,
+    depth_stencil_state: Gd<RdPipelineDepthStencilState>,
+    blend_state: Gd<RdPipelineColorBlendState>,
+    pipeline_cache: quick_cache::unsync::Cache<
+        RasterPipelineKey,
+        Rid,
+        quick_cache::UnitWeighter,
+        quick_cache::DefaultHashBuilder,
+        RasterPipelineCacheLifecycle,
+    >,
 }
 
-impl Drop for Renderer {
+#[derive(Clone)]
+struct RasterPipelineKey {
+    fb_fmt: i64,
+    scs: Array<Gd<RdPipelineSpecializationConstant>>,
+}
+
+impl Hash for RasterPipelineKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.fb_fmt.hash(state);
+        for sc in self.scs.iter_shared() {
+            sc.get_constant_id().hash(state);
+            sc.get_value().hash().hash(state);
+        }
+    }
+}
+
+impl PartialEq for RasterPipelineKey {
+    fn eq(&self, other: &Self) -> bool {
+        let mut is_eq = self.fb_fmt == other.fb_fmt && self.scs.len() == other.scs.len();
+        if !is_eq {
+            return is_eq;
+        } else {
+            for i in 0..self.scs.len() {
+                if self.scs.get(i).unwrap().get_constant_id()
+                    != other.scs.get(i).unwrap().get_constant_id()
+                    || self.scs.get(i).unwrap().get_value() != other.scs.get(i).unwrap().get_value()
+                {
+                    is_eq = false;
+                    break;
+                }
+            }
+        }
+        is_eq
+    }
+}
+impl Eq for RasterPipelineKey {}
+
+struct RasterPipelineCacheLifecycle;
+
+impl quick_cache::Lifecycle<RasterPipelineKey, Rid> for RasterPipelineCacheLifecycle {
+    type RequestState = ();
+
+    fn begin_request(&self) -> Self::RequestState {}
+
+    fn on_evict(&self, _state: &mut Self::RequestState, _key: RasterPipelineKey, val: Rid) {
+        RenderingServer::singleton()
+            .get_rendering_device()
+            .unwrap()
+            .free_rid(val);
+    }
+}
+
+impl Drop for Raster {
     fn drop(&mut self) {
         if self.framebuffer.is_valid() && self.rd.framebuffer_is_valid(self.framebuffer) {
             self.rd.free_rid(self.framebuffer);
@@ -40,21 +107,41 @@ impl Drop for Renderer {
     }
 }
 
-impl Renderer {
-    pub fn from_shader_file(shader_file: &Gd<RdShaderFile>) -> Self {
+impl Raster {
+    pub fn load_shader_file(shader_file: &Gd<RdShaderFile>) -> Self {
         let mut rd = RenderingServer::singleton().get_rendering_device().unwrap();
         let spirv = shader_file.get_spirv().unwrap();
         let shader = rd.shader_create_from_spirv(&spirv);
+        let pipeline_cache = quick_cache::unsync::Cache::with(
+            RASTER_PIPELINE_CACHE_SIZE,
+            RASTER_PIPELINE_CACHE_SIZE.try_into().unwrap(),
+            Default::default(),
+            Default::default(),
+            RasterPipelineCacheLifecycle,
+        );
+
+        let rasterization_state = RdPipelineRasterizationState::new_gd();
+        let multisample_state = RdPipelineMultisampleState::new_gd();
+        let depth_stencil_state = RdPipelineDepthStencilState::new_gd();
+        let mut blend_state = RdPipelineColorBlendState::new_gd();
+        blend_state.set_attachments(&Array::from(&[
+            RdPipelineColorBlendStateAttachment::new_gd(),
+        ]));
         Self {
             rd,
             shader,
             pipeline: Rid::Invalid,
             framebuffer: Rid::Invalid,
+            pipeline_cache,
+            rasterization_state,
+            multisample_state,
+            depth_stencil_state,
+            blend_state,
         }
     }
 
-    pub fn from_shader_file_path(path: impl AsArg<GString>) -> Self {
-        Self::from_shader_file(&ResourceLoader::singleton().load(path).unwrap().cast())
+    pub fn load_shader_file_path(path: impl AsArg<GString>) -> Self {
+        Self::load_shader_file(&ResourceLoader::singleton().load(path).unwrap().cast())
     }
 
     pub fn setup_pipeline_texure(
@@ -67,30 +154,7 @@ impl Renderer {
             &Array::new(),
             1,
         );
-        let fb_fmt = self.rd.framebuffer_get_format(fb);
-        let mut blend_state = RdPipelineColorBlendState::new_gd();
-        blend_state.set_attachments(&Array::from(&[
-            RdPipelineColorBlendStateAttachment::new_gd(),
-        ]));
-        let pipeline = self
-            .rd
-            .render_pipeline_create_ex(
-                self.shader,
-                fb_fmt,
-                RenderingDevice::INVALID_ID.into(),
-                RenderPrimitive::TRIANGLES,
-                &RdPipelineRasterizationState::new_gd(),
-                &RdPipelineMultisampleState::new_gd(),
-                &RdPipelineDepthStencilState::new_gd(),
-                &blend_state,
-            )
-            .specialization_constants(scs)
-            .done();
-        if self.pipeline.is_valid() && self.rd.render_pipeline_is_valid(self.pipeline) {
-            self.rd.free_rid(self.pipeline);
-        }
-        self.pipeline = pipeline;
-        self.framebuffer = fb;
+        self.setup_pipeline_framebuffer(fb, scs);
     }
 
     pub fn setup_pipeline_framebuffer(
@@ -98,35 +162,40 @@ impl Renderer {
         fb: Rid,
         scs: &Array<Gd<RdPipelineSpecializationConstant>>,
     ) {
-        let fb_fmt = self.rd.framebuffer_get_format(fb);
-        let mut blend_state = RdPipelineColorBlendState::new_gd();
-        blend_state.set_attachments(&Array::from(&[
-            RdPipelineColorBlendStateAttachment::new_gd(),
-        ]));
-        let pipeline = self
-            .rd
-            .render_pipeline_create_ex(
-                self.shader,
-                fb_fmt,
-                RenderingDevice::INVALID_ID.into(),
-                RenderPrimitive::TRIANGLES,
-                &RdPipelineRasterizationState::new_gd(),
-                &RdPipelineMultisampleState::new_gd(),
-                &RdPipelineDepthStencilState::new_gd(),
-                &blend_state,
-            )
-            .specialization_constants(scs)
-            .done();
-        if self.pipeline.is_valid() && self.rd.render_pipeline_is_valid(self.pipeline) {
-            self.rd.free_rid(self.pipeline);
-        }
-        self.pipeline = pipeline;
         self.framebuffer = fb;
+        let fb_fmt = self.rd.framebuffer_get_format(fb);
+        self.pipeline = *self
+            .pipeline_cache
+            .get_or_insert_with(
+                &RasterPipelineKey {
+                    fb_fmt,
+                    scs: scs.clone(),
+                },
+                || -> Result<Rid, ()> {
+                    let pipeline = self
+                        .rd
+                        .render_pipeline_create_ex(
+                            self.shader,
+                            fb_fmt,
+                            RenderingDevice::INVALID_ID.into(),
+                            RenderPrimitive::TRIANGLES,
+                            &self.rasterization_state,
+                            &self.multisample_state,
+                            &self.depth_stencil_state,
+                            &self.blend_state,
+                        )
+                        .specialization_constants(scs)
+                        .done();
+                    Ok(pipeline)
+                },
+            )
+            .unwrap()
+            .unwrap();
     }
 }
 
 pub struct TexCopy {
-    renderer: Renderer,
+    renderer: Raster,
     scs: Array<Gd<RdPipelineSpecializationConstant>>,
     uniforms: Array<Gd<RdUniform>>,
     sampler: Rid,
@@ -147,7 +216,7 @@ impl TexCopy {
             .bind()
             .default_sampler;
         Self {
-            renderer: Renderer::from_shader_file_path(TEX_COPY_SHADER_PATH),
+            renderer: Raster::load_shader_file_path(TEX_COPY_SHADER_PATH),
             scs: Array::new(),
             uniforms,
             sampler,
@@ -205,7 +274,7 @@ struct BlurDownsamplePushConstants {
 }
 
 pub struct BlurDownsample {
-    renderer: Renderer,
+    renderer: Raster,
     scs: Array<Gd<RdPipelineSpecializationConstant>>,
     ubo: PackedArray<u8>,
     uniforms: Array<Gd<RdUniform>>,
@@ -234,7 +303,7 @@ impl BlurDownsample {
             .glow_downsample_sampler;
 
         Self {
-            renderer: Renderer::from_shader_file_path(DOWNSAMPLER_SHADER_PATH),
+            renderer: Raster::load_shader_file_path(DOWNSAMPLER_SHADER_PATH),
             scs: Array::from(&[sc]),
             ubo,
             uniforms,
@@ -320,7 +389,7 @@ struct BlurUpsamplePushConstants {
 }
 
 pub struct BlurUpsample {
-    renderer: Renderer,
+    renderer: Raster,
     scs: Array<Gd<RdPipelineSpecializationConstant>>,
     ubo: PackedArray<u8>,
     uniforms_src: Array<Gd<RdUniform>>,
@@ -356,7 +425,7 @@ impl BlurUpsample {
             .bind()
             .default_sampler;
         Self {
-            renderer: Renderer::from_shader_file_path(UPSAMPLE_SHADER_PATH),
+            renderer: Raster::load_shader_file_path(UPSAMPLE_SHADER_PATH),
             scs: Array::from(&[sc]),
             ubo,
             uniforms_src,
@@ -486,7 +555,7 @@ pub struct ToneMapSettings {
 }
 
 pub struct ToneMapper {
-    renderer: Renderer,
+    renderer: Raster,
     scs: Array<Gd<RdPipelineSpecializationConstant>>,
     ubo: PackedArray<u8>,
     uniforms_src: Array<Gd<RdUniform>>,
@@ -535,7 +604,7 @@ impl ToneMapper {
         let default_tex_white = singleton.bind().default_texture_white;
 
         Self {
-            renderer: Renderer::from_shader_file_path(TONEMAPPER_SHADER_PATH),
+            renderer: Raster::load_shader_file_path(TONEMAPPER_SHADER_PATH),
             scs,
             ubo,
             uniforms_src,
