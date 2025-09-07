@@ -20,7 +20,7 @@ tonemap_type = 5
 compositor_effects = Array[CompositorEffect]([SubResource("PostEffectToneMap_28hsc")])
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4v18s"]
-albedo_color = Color(1.759715, 0.9167989, 1.2167182, 1)
+albedo_color = Color(1.5257139, 0.7914888, 1.0527347, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_28hsc"]
 
