@@ -135,11 +135,7 @@ impl ICompositorEffect for PostEffectToneMap {
             .unwrap()
             .cast::<RenderSceneBuffersRd>();
 
-        if rb.get_view_count() != 1 {
-            return;
-        }
-
-        let color_tex = rb.get_color_texture();
+        let color_tex = rb.get_color_layer(0);
         let color_fmt = self.rd.texture_get_format(color_tex).unwrap();
         let color_data_fmt = color_fmt.get_format();
         let buffer_size = rb.get_internal_size();
@@ -208,104 +204,110 @@ impl ICompositorEffect for PostEffectToneMap {
             }
         }
 
-        let mut source = color_tex;
-        let mut dest = rb.get_texture_slice(scope, blur1, 0, 1, 1, 1);
-        let mut source_size = buffer_size;
-        let luminance_multiplier = 2.0f32;
-        // Downsample.
-        self.downsample.exec(
-            source,
-            dest,
-            luminance_multiplier,
-            source_size,
-            self.glow_strength,
-            true,
-            self.glow_hdr_luminance_cap,
-            self.exposure,
-            self.glow_bloom,
-            self.glow_hdr_bleed_threshold,
-            self.glow_hdr_bleed_scale,
-        );
-        let mut vp_size;
-        for i in 1..max_glow_index + 1 {
-            source = dest;
-            vp_size = rb.get_texture_slice_size(scope, blur1, i.try_into().unwrap());
-            dest = rb.get_texture_slice(scope, blur1, 0, (i + 1).try_into().unwrap(), 1, 1);
+        for layer in 0..rb.get_view_count() {
+            let color_tex = rb.get_color_layer(layer);
+            let mut source = color_tex;
+            let mut dest = rb.get_texture_slice(scope, blur1, 0, 1, 1, 1);
+            let mut source_size = buffer_size;
+            let luminance_multiplier = 2.0f32;
+            // Downsample.
             self.downsample.exec(
                 source,
                 dest,
                 luminance_multiplier,
-                vp_size,
+                source_size,
                 self.glow_strength,
-                false,
+                true,
                 self.glow_hdr_luminance_cap,
                 self.exposure,
                 self.glow_bloom,
                 self.glow_hdr_bleed_threshold,
                 self.glow_hdr_bleed_scale,
             );
-        }
-        // Upsample.
-        if max_glow_index <= 0 {
-            source = self.global_rids_singleton.bind().default_texture_black;
-            vp_size = rb.get_texture_slice_size(scope, blur0, 2);
-            dest = rb.get_texture_slice(scope, blur0, 0, 2, 1, 1);
-            let blend_tex = rb.get_texture_slice(scope, blur1, 0, 1, 1, 1);
-            source_size = vp_size;
-            self.upsample.exec(
-                source,
-                dest,
-                blend_tex,
-                source_size,
-                vp_size,
-                glow_levels[0],
-                0.0,
+            let mut vp_size;
+            for i in 1..max_glow_index + 1 {
+                source = dest;
+                vp_size = rb.get_texture_slice_size(scope, blur1, i.try_into().unwrap());
+                dest = rb.get_texture_slice(scope, blur1, 0, (i + 1).try_into().unwrap(), 1, 1);
+                self.downsample.exec(
+                    source,
+                    dest,
+                    luminance_multiplier,
+                    vp_size,
+                    self.glow_strength,
+                    false,
+                    self.glow_hdr_luminance_cap,
+                    self.exposure,
+                    self.glow_bloom,
+                    self.glow_hdr_bleed_threshold,
+                    self.glow_hdr_bleed_scale,
+                );
+            }
+            // Upsample.
+            if max_glow_index <= 0 {
+                source = self.global_rids_singleton.bind().default_texture_black;
+                vp_size = rb.get_texture_slice_size(scope, blur0, 2);
+                dest = rb.get_texture_slice(scope, blur0, 0, 2, 1, 1);
+                let blend_tex = rb.get_texture_slice(scope, blur1, 0, 1, 1, 1);
+                source_size = vp_size;
+                self.upsample.exec(
+                    source,
+                    dest,
+                    blend_tex,
+                    source_size,
+                    vp_size,
+                    glow_levels[0],
+                    0.0,
+                );
+            }
+            for i in (0..max_glow_index).rev() {
+                source = dest;
+                source_size = rb.get_texture_slice_size(scope, blur0, (i + 3).try_into().unwrap());
+                vp_size = rb.get_texture_slice_size(scope, blur0, (i + 2).try_into().unwrap());
+                dest = rb.get_texture_slice(scope, blur0, 0, (i + 2).try_into().unwrap(), 1, 1);
+                let blend_tex =
+                    rb.get_texture_slice(scope, blur1, 0, (i + 1).try_into().unwrap(), 1, 1);
+                self.upsample.exec(
+                    source,
+                    dest,
+                    blend_tex,
+                    source_size,
+                    vp_size,
+                    glow_levels[TryInto::<usize>::try_into(i).unwrap()],
+                    if i == max_glow_index - 1 {
+                        glow_levels[TryInto::<usize>::try_into(i + 1).unwrap()]
+                    } else {
+                        1.0
+                    },
+                );
+            }
+            let dest_fb = FramebufferCacheRd::get_cache_multipass(
+                &Array::from(&[color_tex]),
+                &Array::new(),
+                1,
             );
-        }
-        for i in (0..max_glow_index).rev() {
-            source = dest;
-            source_size = rb.get_texture_slice_size(scope, blur0, (i + 3).try_into().unwrap());
-            vp_size = rb.get_texture_slice_size(scope, blur0, (i + 2).try_into().unwrap());
-            dest = rb.get_texture_slice(scope, blur0, 0, (i + 2).try_into().unwrap(), 1, 1);
-            let blend_tex =
-                rb.get_texture_slice(scope, blur1, 0, (i + 1).try_into().unwrap(), 1, 1);
-            self.upsample.exec(
-                source,
-                dest,
-                blend_tex,
-                source_size,
-                vp_size,
-                glow_levels[TryInto::<usize>::try_into(i).unwrap()],
-                if i == max_glow_index - 1 {
-                    glow_levels[TryInto::<usize>::try_into(i + 1).unwrap()]
-                } else {
-                    1.0
+            let blur0level0 = rb.get_texture_slice(scope, blur0, 0, 0, 1, 1);
+            let blur0level2 = rb.get_texture_slice(scope, blur0, 0, 2, 1, 1);
+            self.copy.exec(color_tex, blur0level0);
+            self.tonemapper.exec(
+                blur0level0,
+                dest_fb,
+                buffer_size,
+                copy::ToneMapSettings {
+                    glow_tex_size: rb.get_texture_slice_size(scope, blur0, 2),
+                    glow_tex: blur0level2,
+                    use_glow_map: glow_map.is_valid(),
+                    glow_map_tex: glow_map,
+                    glow_intensity,
+                    glow_map_strength: self.glow_map_strength,
+                    exposure: self.exposure,
+                    white: self.white,
+                    use_fxaa: self.use_fxaa,
+                    tonemap_type: self.tonemap_type,
+                    glow_mode: self.glow_blend_mode,
                 },
             );
         }
-        let dest_fb =
-            FramebufferCacheRd::get_cache_multipass(&Array::from(&[color_tex]), &Array::new(), 1);
-        let blur0level0 = rb.get_texture_slice(scope, blur0, 0, 0, 1, 1);
-        let blur0level2 = rb.get_texture_slice(scope, blur0, 0, 2, 1, 1);
-        self.copy.exec(color_tex, blur0level0);
-        self.tonemapper.exec(
-            blur0level0,
-            dest_fb,
-            buffer_size,
-            copy::ToneMapSettings {
-                glow_tex_size: rb.get_texture_slice_size(scope, blur0, 2),
-                glow_tex: blur0level2,
-                use_glow_map: glow_map.is_valid(),
-                glow_map_tex: glow_map,
-                glow_intensity,
-                glow_map_strength: self.glow_map_strength,
-                exposure: self.exposure,
-                white: self.white,
-                use_fxaa: self.use_fxaa,
-                tonemap_type: self.tonemap_type,
-                glow_mode: self.glow_blend_mode,
-            },
-        );
     }
 }
 
